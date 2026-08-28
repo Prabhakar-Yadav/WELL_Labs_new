@@ -1,242 +1,343 @@
-# TLBC D95 Canal Blockage Detection
+# Well-LAB-ALL- Production Pipeline
 
-**AI-powered drone survey analysis for canal health monitoring in Raichur District, Karnataka.**
+**AI-powered drone and satellite imagery analysis for canal health monitoring and water body detection.**
 
-This project uses deep learning and drone imagery to automatically detect **vegetation blockages**, **structural damage (cracks/erosion)**, and **silt accumulation** across the entire TLBC D95 canal network — replacing weeks of manual field surveys with a GPS-accurate AI analysis.
+This system automatically detects:
+- **Canal boundaries** (concrete + earthen channels)
+- **Vegetation blockages** (clear / partial / moderate / blocked)
+- **Structural damage** (cracks, erosion, rubble on banks)
+- **Silt depth** (low / medium / high accumulation)
+- **Farm ponds** (from Sentinel-2 satellite imagery)
 
-> **Related project:** farm-pond detection from Sentinel-2 satellite imagery
-> lives in a separate sub-project — see [`Water-bodies/README.md`](Water-bodies/README.md)
-> for that pipeline, results (F1 0.739, 85% ponds found), and run instructions.
-
----
-
-## Results Summary
-
-| Metric | Value |
-|--------|-------|
-| Canal reaches analysed | 157 |
-| Canal detection accuracy (IoU) | **87.6%** |
-| Clear reaches | 122 (77.7%) |
-| Partial blockage | 23 (14.6%) |
-| Fully blocked | 12 (7.6%) |
-| Structural damage locations | 8 |
-| Total drone data processed | 64 GB |
-| Final output size | ~1.66 GB GeoTIFFs |
+Built for the TLBC D95 (Attanur) and NRBC canal networks in Karnataka, India — but adaptable to any canal system.
 
 ---
 
-## What the Pipeline Does
+## Quick Start for New Users
+
+### What You Need (Input Data)
+
+| Data Type | File Format | Where to Put It |
+|-----------|-------------|-----------------|
+| **Drone orthomosaics** | `.tif` files | `data/raw_drone_orthos/` |
+| **Canal alignment** | `.shp` shapefile | `data/alignments/` |
+| **DSM/DTM** (for silt) | `.tif` elevation | `data/raw_elevation/` |
+| **Sentinel-2** (for ponds) | `.SAFE` folders | `data/raw_satellite/` |
+
+> **No coding required** for running trained models — just command-line commands.
+
+---
+
+## Pipeline Overview (5 Tasks)
 
 ```
-Drone orthomosaics (64 GB)
-        │
-        ▼
-[Stage 1] Canal Detection       ← YOLOv8 Segmentation (IoU = 0.876)
-        │ *_canal_mask.tif
-        ▼
-[Stage 2] Blockage Classification ← Rule-based: NDVI + green coverage + texture
-        │ *_blockage.tif  (1=clear  2=partial  3=blocked)
-        ▼
-[Stage 3] Structural Damage     ← Mask R-CNN + ResNet50 (val loss = 0.18)
-        │ canal_data.json  (structural_damage: true/false per reach)
-        ▼
-[Stage 4] Silt Depth            ← Elevation differencing: DSM − DTM
-        │ *_silt.tif  (1=low  2=medium  3=high)
-        ▼
-QGIS-ready GeoTIFFs  +  canal_data.json
+┌─────────────────────────────────────────────────────────────────────┐
+│  TASK 1: Canal Detection                                            │
+│  Input: Drone orthomosaic (.tif)                                    │
+│  Output: Canal masks, extraction stats                              │
+│  Command: python pipeline/task1_canal_detection/predict.py          │
+├─────────────────────────────────────────────────────────────────────┤
+│  TASK 2: Blockage Classification                                    │
+│  Input: Canal shapefile + orthomosaic                               │
+│  Output: 4-class blockage (clear/partial/moderate/blocked)          │
+│  Command: python pipeline/task2_blockage_percentage/line_blockage.py│
+├─────────────────────────────────────────────────────────────────────┤
+│  TASK 3: Structural Damage                                          │
+│  Input: Canal segments + orthomosaic                                │
+│  Output: Damage flags per segment                                   │
+│  Command: python pipeline/task3_concrete_damage/predict.py          │
+├─────────────────────────────────────────────────────────────────────┤
+│  TASK 4: Silt Depth                                                 │
+│  Input: DSM + DTM + canal mask                                      │
+│  Output: Silt depth raster (low/medium/high)                        │
+│  Command: python pipeline/task4_silt_depth/silt_calculator.py       │
+├─────────────────────────────────────────────────────────────────────┤
+│  TASK 5: Farm Pond Detection                                        │
+│  Input: Sentinel-2 satellite imagery                                │
+│  Output: Pond shapefile with area & perimeter                       │
+│  Command: python pipeline/task5_farm_ponds/03_inference.py          │
+└─────────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────────┐
+│  PRODUCTION EXPORT                                                  │
+│  Input: Final processed segments                                    │
+│  Output: Client-ready package (images, maps, spreadsheet)           │
+│  Command: python pipeline/export_production_pack.py tlbc            │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Requirements
-
-**Python 3.9 or 3.10 recommended**
-
-Install all dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-Or install manually:
-
-```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-pip install segmentation-models-pytorch rasterio opencv-python scikit-image scipy matplotlib numpy Pillow jupyter
-```
-
-> **GPU recommended** for notebooks 05, 06, and 07. CPU will work but training will be very slow.
-
----
-
-## Data You Need
-
-The large raw data files are **not included** in this repository (too large for GitHub).
-
-You need:
-
-| File / Folder | Size | Description |
-|---------------|------|-------------|
-| `TLBC_D95_ATTANUR_1_ortho.tif` | 4.2 GB | Orthomosaic — Attanur Section 1 |
-| `TLBC_D95_ATTANUR_2_ortho.tif` | 22.5 GB | Orthomosaic — Attanur Section 2 |
-| `TLBC_D95_ATTANUR_3_ortho.tif` | 17.7 GB | Orthomosaic — Attanur Section 3 |
-| `TLBC_D95_ATTANUR_4_ortho.tif` | 2.9 GB | Orthomosaic — Attanur Section 4 |
-| `TLBC_D95_SHAKAPUR_ortho.tif` | 10.3 GB | Orthomosaic — Shakapur Section |
-| `TLBC_DSM_DTM/` | 4.8 GB | Digital Surface Model + Digital Terrain Model |
-
-Place the orthomosaic `.tif` files in the **root of the project folder** and `TLBC_DSM_DTM/` as a subfolder.
-
-> **Coordinate system:** WGS84 UTM Zone 43N (EPSG:32643)
-
----
-
-## How to Run — Step by Step
-
-Run the notebooks **in order**. Each notebook's output feeds the next.
-
-### Step 1 — Inspect the Data
-```
-jupyter notebook 03_canal_extraction.ipynb
-```
-Extracts canal regions from the large orthomosaics. Saves focused canal tiles.
-
-### Step 2 — Build the Dataset
-```
-jupyter notebook 04_dataset.ipynb
-jupyter notebook 04_patch_tiling.ipynb
-```
-- `04_dataset.ipynb` — loads annotations and prepares train/val split
-- `04_patch_tiling.ipynb` — splits images into 1024×1024 px tiles
-
-### Step 3 — Train Canal Detector
-```
-jupyter notebook 05_binary_training.ipynb
-```
-Trains the UNet segmentation model to detect canal boundaries.
-**Output:** `outputs/05b_binary/best_binary_unet_v5.pth`
-
-### Step 4 — Train Structural Damage Detector
-```
-jupyter notebook 06_fic_training.ipynb
-```
-Trains Mask R-CNN to detect cracks, erosion, and concrete damage (FIC).
-**Output:** `outputs/06_fic/best_fic_unet.pth`
-
-### Step 5 — Run Blockage Detection (Main Inference)
-```
-jupyter notebook 07_blockage_detection.ipynb
-```
-Runs the full pipeline — canal detection, blockage classification, FIC detection.
-**Output:** `outputs/07_blockage/` (1.6 GB GeoTIFFs + `canal_data.json`)
-
-> **Important:** In Notebook 07, run cells in this exact order:
-> `Cell 1 → Cell 2b → Cell 3 → Cell 4 → Cell 8`
-> Running Cell 8 before Cells 3–4 will cause a NameError.
-
-### Step 6 — Run Silt Detection
-```
-jupyter notebook 08_silt_detection.ipynb
-```
-Measures silt depth by subtracting DTM from DSM inside canal boundaries.
-**Output:** `outputs/08_silt/` (57 MB GeoTIFFs)
-
----
-
-## Project Structure
+## Directory Structure
 
 ```
-Wells-Lab/
+Well-LAB-ALL-/
 │
-├── 03_canal_extraction.ipynb      # Step 1: Extract canal regions
-├── 04_dataset.ipynb               # Step 2: Build dataset
-├── 04_patch_tiling.ipynb          # Step 2b: Tile images for training
-├── 05_binary_training.ipynb       # Step 3: Train canal detector
-├── 06_fic_training.ipynb          # Step 4: Train damage detector
-├── 07_blockage_detection.ipynb    # Step 5: Full blockage inference
-├── 08_silt_detection.ipynb        # Step 6: Silt depth measurement
+├── config/
+│   └── models/              ← Trained model weights (.pth, .pt, .pkl)
 │
-├── 01_inspect_tifs.py             # Utility: inspect GeoTIFF files
-├── 02_spectral_analysis.py        # Utility: spectral band analysis
-├── 03_canal_extraction.py         # Utility: canal extraction script
-├── extract_from_labels.py         # Utility: extract patches from labels
-├── extract_patches_for_labeling.py
-├── extract_patches_v2.py
-├── label_full_image.py
+├── data/
+│   ├── raw_drone_orthos/    ← Drone TIFFs (junction to _keep_locally)
+│   ├── raw_elevation/       ← DSM, DTM files
+│   ├── raw_satellite/       ← Sentinel-2 .SAFE folders
+│   ├── alignments/          ← Canal shapefiles (.shp)
+│   └── training_labels/     ← Labels, farm ponds, train lines
 │
-├── build_report.py                # Builds PROJECT_REPORT.docx
-├── make_pngs.py                   # Converts DOCX report to PNGs
+├── labels/
+│   ├── annotation/          ← Original LabelMe annotations
+│   └── annotation_v2/       ← v2 annotations + masks
 │
-├── annotation/                    # Training patches (PNGs + JSON labels)
-├── annotation_v2/                 # Version 2 annotations (JPG + JSON)
+├── pipeline/
+│   ├── common/              ← Shared utilities (inspect, spectral, reports)
+│   ├── task1_canal_detection/      ← Canal extraction scripts + notebooks
+│   ├── task2_blockage_percentage/  ← Blockage ML + classification
+│   ├── task3_concrete_damage/      ← Damage detection
+│   ├── task4_silt_depth/           ← Silt calculation
+│   ├── task5_farm_ponds/           ← Pond detection + helpers/
+│   └── export_production_pack.py   ← Final client export
 │
 ├── outputs/
-│   ├── 01_inspect/                # Thumbnail images
-│   ├── 02_spectral/               # Spectral analysis charts
-│   ├── 03_extraction*/            # Canal extraction visualisations
-│   ├── 05_training/               # Training curves, val predictions
-│   ├── 05b_binary/                # Binary model predictions
-│   ├── 06_fic/                    # FIC damage visualisations
-│   ├── 07_blockage/               # Blockage GeoTIFFs + canal_data.json
-│   └── 08_silt/                   # Silt depth GeoTIFFs
+│   ├── 1_canal_masks/       ← Canal detection outputs
+│   ├── 2_blockage_maps/     ← Blockage classification
+│   ├── 3_silt_depth/        ← Silt depth rasters
+│   ├── 4_farm_ponds/        ← Pond detection results
+│   └── 5_production_packages/  ← Final deliverables
 │
-├── docs/
-│   └── canal_physical_characteristics.md
-│
-├── PROJECT_REPORT.docx            # Final 10-page project report
-├── requirements.txt
-├── .gitignore
-└── README.md
+├── requirements.txt         ← Python dependencies
+├── FILE_GUIDE_SHORT.md      ← What each file does (execution order)
+└── README.md                ← This file
 ```
 
 ---
 
-## Output Files Explained
+## Step-by-Step Instructions
 
-### Blockage outputs — `outputs/07_blockage/`
-
-| File | Description |
-|------|-------------|
-| `*_blockage.tif` | Pixel-level blockage map. Values: `1`=clear, `2`=partial, `3`=blocked |
-| `*_canal_mask.tif` | Binary canal boundary. Values: `1`=canal, `0`=not canal |
-| `canal_data.json` | Per-reach data: reach ID, status, structural_damage flag, GPS coords |
-
-### Silt outputs — `outputs/08_silt/`
-
-| File | Description |
-|------|-------------|
-| `*_silt.tif` | Classified silt depth. Values: `1`=low (<0.5m), `2`=medium (0.5–1m), `3`=high (>1m) |
-| `*_chm_canal.tif` | Continuous silt depth in metres (DSM minus DTM) |
-
----
-
-## Viewing Results in QGIS
-
-1. **Load orthomosaic** as base layer: `Layer → Add Raster Layer`
-2. **Load blockage raster:** `*_blockage.tif`
-3. Open **Layer Properties → Symbology → Paletted/Unique Values**
-4. Set colours:
-   - `0` → Transparent
-   - `1` → Green `#00AA00` (clear)
-   - `2` → Orange `#FF8C00` (partial)
-   - `3` → Red `#DC143C` (blocked)
-5. Set **layer transparency to 60%** to see ortho underneath
-
----
-
-## Project Report
-
-The complete project report (methods, results, data description, action items) is available as:
-
-```
-PROJECT_REPORT.docx
-```
-
-To regenerate the report:
+### Installation (One-Time Setup)
 
 ```bash
-python build_report.py    # creates PROJECT_REPORT.docx
-python make_pngs.py       # converts to PNG pages (requires MS Word on Windows)
+# 1. Install Python 3.9 or 3.10
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Verify GPU support (optional but recommended)
+python -c "import torch; print(torch.cuda.is_available())"
+# Should print: True (if GPU available)
 ```
+
+---
+
+### Task 1: Detect Canals (No Training Required)
+
+**If you already have a trained model:**
+
+```bash
+python pipeline/task1_canal_detection/predict.py
+```
+
+**To train a new model on your data:**
+
+1. **Extract patches** from your orthomosaic:
+   ```bash
+   python pipeline/task1_canal_detection/extract_patches_v2.py
+   ```
+
+2. **Label the patches** using LabelMe:
+   ```bash
+   python -m labelme labels/annotation_v2/
+   ```
+   - Draw polygons around canals
+   - Labels: "canal", "fic" (earthen), "not_canal"
+
+3. **Create masks** from labels:
+   ```bash
+   python pipeline/task1_canal_detection/extract_from_labels.py
+   ```
+
+4. **Train the model** (run in Jupyter):
+   ```bash
+   jupyter notebook pipeline/task1_canal_detection/05_binary_training.ipynb
+   ```
+   - Follow cells in order
+   - Best model saves to: `config/models/canal_segmentation.pth`
+
+**Output:** `outputs/1_canal_masks/` — canal masks and statistics
+
+---
+
+### Task 2: Classify Blockages
+
+**Step 1: Create canal reaches**
+```bash
+# For TLBC/Attanur canals:
+python pipeline/task2_blockage_percentage/line_blockage.py tlbc
+
+# For NRBC canals:
+python pipeline/task2_blockage_percentage/line_blockage.py nrbc
+```
+
+**Step 2: Label some reaches in QGIS**
+- Open `outputs/2_blockage_maps/tlbc_blockage_reaches.shp` in QGIS
+- Edit the `status` field: clear / partial / blocked
+- Save edits
+
+**Step 3: Train classifier**
+```bash
+python pipeline/task2_blockage_percentage/extract_features.py
+```
+- Extracts 18 features per reach
+- Trains Random Forest / Gradient Boosting / MLP
+- Best model saves to: `config/models/tlbc_blockage_classifier.pkl`
+- Predictions saved to: `data/alignments/TLBC_alignment/tlbc_segments.shp`
+
+**Alternative (no training):** Simple vegetation thresholding
+```bash
+python pipeline/task2_blockage_percentage/predict_segments.py
+```
+
+---
+
+### Task 3: Detect Structural Damage
+
+```bash
+python pipeline/task3_concrete_damage/predict.py
+```
+
+**What it does:**
+- Analyzes texture along canal banks
+- Detects rubble/broken concrete
+- Adds `damage` field to segments shapefile
+
+**Output:** Updated `data/alignments/TLBC_alignment/tlbc_segments.shp`
+
+---
+
+### Task 4: Calculate Silt Depth
+
+**Prerequisites:** DSM (Digital Surface Model) and DTM (Digital Terrain Model)
+
+```bash
+# Step 1: Calculate silt
+python pipeline/task4_silt_depth/silt_calculator.py \
+  data/raw_elevation/ATTANUR_2_dsm.tif \
+  data/raw_elevation/ATTANUR_2_dtm.tif \
+  outputs/1_canal_masks/ATTANUR_2_mask.tif \
+  outputs/3_silt_depth/ATTANUR_2_silt.tif
+
+# Step 2: Refine to canal corridor
+python pipeline/task4_silt_depth/refine_silt.py
+
+# Step 3: Fill gaps
+python pipeline/task4_silt_depth/fill_silt.py
+```
+
+**Output:** 
+- `outputs/3_silt_depth/*_silt.tif` — Classified (1=low, 2=medium, 3=high)
+
+---
+
+### Task 5: Detect Farm Ponds (Satellite)
+
+**Step 1: Build training dataset**
+```bash
+python pipeline/task5_farm_ponds/build_dataset.py
+```
+
+**Step 2: Train model**
+```bash
+python pipeline/task5_farm_ponds/train.py 40
+```
+(40 = number of epochs)
+
+**Step 3: Run inference on new areas**
+```bash
+python pipeline/task5_farm_ponds/03_inference.py 0.5
+```
+(0.5 = probability threshold)
+
+**Output:** `outputs/4_farm_ponds/<tile>/ponds.shp` — Detected ponds with area
+
+---
+
+### Production Export (Final Deliverable)
+
+After all processing is complete, create the client package:
+
+```bash
+# For TLBC/Attanur:
+python pipeline/export_production_pack.py tlbc
+
+# For NRBC:
+python pipeline/export_production_pack.py nrbc
+```
+
+**Output in `outputs/5_production_packages/<project>/`:**
+
+| File | What It Is |
+|------|------------|
+| `images/0001.jpg` | Numbered zoomed images of each reach |
+| `boxes.geojson` | Web-ready clickable map |
+| `blocks.shp` | QGIS shapefile with all attributes |
+| `index.csv` | Spreadsheet with ID, status, %, GPS coords |
+| `overview_*.png` | Overview maps |
+
+---
+
+## Viewing Results
+
+### In QGIS
+
+1. **Load orthomosaic:** Layer → Add Raster Layer
+2. **Load blockage shapefile:** `outputs/2_blockage_maps/*.shp`
+3. **Style by status:**
+   - Green = clear
+   - Orange/Yellow = partial
+   - Red = blocked
+
+### Web Map
+
+Open `boxes.geojson` in:
+- [geojson.io](https://geojson.io) — instant web map
+- Google Earth Pro — File → Import
+
+---
+
+## File Reference Guide
+
+For detailed explanation of every file:
+
+| Document | What's Inside |
+|----------|---------------|
+| `FILE_GUIDE_SHORT.md` | Every file explained in execution order |
+| `pipeline/common/utils.py` | Shared helper functions |
+
+---
+
+## Troubleshooting
+
+### "File not found" errors
+- Check that orthomosaics are in `data/raw_drone_orthos/`
+- Check that shapefiles are in `data/alignments/`
+
+### "CUDA out of memory"
+- Reduce batch size in training notebooks
+- Use smaller tile sizes
+
+### Model not loading
+- Check that model files exist in `config/models/`
+- Verify file paths in scripts
+
+---
+
+## Performance Metrics
+
+| Task | Metric | Value |
+|------|--------|-------|
+| Canal Detection | IoU | 87.6% |
+| Blockage Classification | Exact accuracy | ~85% |
+| Blockage Classification | Within-1-class | ~95% |
+| Farm Pond Detection | F1 Score | 0.739 |
+| Farm Pond Detection | Ponds found | 85% |
 
 ---
 
@@ -244,5 +345,11 @@ python make_pngs.py       # converts to PNG pages (requires MS Word on Windows)
 
 **Prabhakar Yadav**  
 prabhakaryadav0505@gmail.com  
-Wells Lab — TLBC D95 Canal Survey, Raichur District, Karnataka  
-May 2026
+Wells Lab — Canal Survey Project, Karnataka, India  
+2026
+
+---
+
+## License
+
+This project is for research and production use within Wells Lab. Contact the author for external licensing.
